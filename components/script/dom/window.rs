@@ -77,7 +77,7 @@ use script_layout_interface::rpc::{MarginStyleResponse, NodeScrollRootIdResponse
 use script_layout_interface::rpc::{ResolvedStyleResponse, TextIndexResponse};
 use script_runtime::{CommonScriptMsg, ScriptChan, ScriptPort, ScriptThreadEventCategory};
 use script_thread::{MainThreadScriptChan, MainThreadScriptMsg, Runnable, RunnableWrapper};
-use script_thread::{SendableMainThreadScriptChan, ImageCacheMsg};
+use script_thread::{SendableMainThreadScriptChan, ImageCacheMsg, ScriptThread};
 use script_traits::{ConstellationControlMsg, LoadData, MozBrowserEvent, UntrustedNodeAddress};
 use script_traits::{DocumentState, TimerEvent, TimerEventId};
 use script_traits::{ScriptMsg as ConstellationMsg, TimerSchedulerMsg, WindowSizeData, WindowSizeType};
@@ -1133,6 +1133,7 @@ impl Window {
     /// off-main-thread layout.
     ///
     /// Returns true if layout actually happened, false otherwise.
+    #[allow(unsafe_code)]
     pub fn force_reflow(&self,
                         goal: ReflowGoal,
                         query_type: ReflowQueryType,
@@ -1196,16 +1197,16 @@ impl Window {
 
         debug!("script: layout forked");
 
-        match join_port.try_recv() {
+        let complete = match join_port.try_recv() {
             Err(Empty) => {
                 info!("script: waiting on layout");
-                join_port.recv().unwrap();
+                join_port.recv().unwrap()
             }
-            Ok(_) => {}
+            Ok(reflow_complete) => reflow_complete,
             Err(Disconnected) => {
                 panic!("Layout thread failed while script was waiting for a result.");
             }
-        }
+        };
 
         debug!("script: layout joined");
 
@@ -1219,8 +1220,7 @@ impl Window {
             self.emit_timeline_marker(marker.end());
         }
 
-        let pending_images = self.layout_rpc.pending_images();
-        for image in pending_images {
+        for image in complete.pending_images {
             let id = image.id;
             let js_runtime = self.js_runtime.borrow();
             let js_runtime = js_runtime.as_ref().unwrap();
@@ -1243,6 +1243,8 @@ impl Window {
                 nodes.push(JS::from_ref(&*node));
             }
         }
+
+        ScriptThread::note_newly_transitioning_nodes(complete.newly_transitioning_nodes);
 
         true
     }
